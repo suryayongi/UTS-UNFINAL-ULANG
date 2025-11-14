@@ -1,15 +1,8 @@
-// ===== IMPOR BARU UNTUK APOLLO v3 + SUBSCRIPTIONS =====
 const express = require('express');
-const { createServer } = require('http');
-const { WebSocketServer } = require('ws');
-const { useServer } = require('graphql-ws/lib/use/ws');
-const { ApolloServer, gql } = require('apollo-server-express');
-const { makeExecutableSchema } = require('@graphql-tools/schema');
-const { ApolloServerPluginDrainHttpServer } = require('apollo-server-core');
+const { ApolloServer } = require('apollo-server-express');
 const { PubSub } = require('graphql-subscriptions');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
-// ===================================================
 
 const app = express();
 const pubsub = new PubSub();
@@ -25,7 +18,7 @@ app.use(cors({
   credentials: true
 }));
 
-// ===== DATA ASLI (VERSI BLOG) =====
+// In-memory data store (replace with real database in production)
 let posts = [
   {
     id: '1',
@@ -42,6 +35,7 @@ let posts = [
     createdAt: new Date().toISOString(),
   }
 ];
+
 let comments = [
   {
     id: '1',
@@ -52,8 +46,8 @@ let comments = [
   }
 ];
 
-// ===== SKEMA ASLI (VERSI BLOG) =====
-const typeDefs = gql`
+// GraphQL type definitions
+const typeDefs = `
   type Post {
     id: ID!
     title: String!
@@ -93,7 +87,7 @@ const typeDefs = gql`
   }
 `;
 
-// ===== LOGIKA ASLI (VERSI BLOG) =====
+// GraphQL resolvers
 const resolvers = {
   Query: {
     posts: () => posts,
@@ -115,35 +109,57 @@ const resolvers = {
         createdAt: new Date().toISOString(),
       };
       posts.push(newPost);
+      
+      // Publish to subscribers
       pubsub.publish('POST_ADDED', { postAdded: newPost });
+      
       return newPost;
     },
 
     updatePost: (_, { id, title, content }) => {
       const postIndex = posts.findIndex(post => post.id === id);
-      if (postIndex === -1) { throw new Error('Post not found'); }
+      if (postIndex === -1) {
+        throw new Error('Post not found');
+      }
+
       const updatedPost = {
         ...posts[postIndex],
         ...(title && { title }),
         ...(content && { content }),
       };
+
       posts[postIndex] = updatedPost;
+      
+      // Publish to subscribers
       pubsub.publish('POST_UPDATED', { postUpdated: updatedPost });
+      
       return updatedPost;
     },
 
     deletePost: (_, { id }) => {
       const postIndex = posts.findIndex(post => post.id === id);
-      if (postIndex === -1) { return false; }
+      if (postIndex === -1) {
+        return false;
+      }
+
+      // Remove associated comments
       comments = comments.filter(comment => comment.postId !== id);
+      
+      // Remove post
       posts.splice(postIndex, 1);
+      
+      // Publish to subscribers
       pubsub.publish('POST_DELETED', { postDeleted: id });
+      
       return true;
     },
 
     createComment: (_, { postId, content, author }) => {
       const post = posts.find(p => p.id === postId);
-      if (!post) { throw new Error('Post not found'); }
+      if (!post) {
+        throw new Error('Post not found');
+      }
+
       const newComment = {
         id: uuidv4(),
         postId,
@@ -151,14 +167,21 @@ const resolvers = {
         author,
         createdAt: new Date().toISOString(),
       };
+      
       comments.push(newComment);
+      
+      // Publish to subscribers
       pubsub.publish('COMMENT_ADDED', { commentAdded: newComment });
+      
       return newComment;
     },
 
     deleteComment: (_, { id }) => {
       const commentIndex = comments.findIndex(comment => comment.id === id);
-      if (commentIndex === -1) { return false; }
+      if (commentIndex === -1) {
+        return false;
+      }
+
       comments.splice(commentIndex, 1);
       return true;
     },
@@ -180,28 +203,21 @@ const resolvers = {
   },
 };
 
-// ===== FUNGSI startServer() BARU UNTUK v3 (INI PERBAIKANNYA) =====
 async function startServer() {
-  const schema = makeExecutableSchema({ typeDefs, resolvers });
-  const httpServer = createServer(app);
-
-  const wsServer = new WebSocketServer({
-    server: httpServer,
-    path: '/graphql',
-  });
-
-  const serverCleanup = useServer({ schema }, wsServer);
-
+  // Create Apollo Server
   const server = new ApolloServer({
-    schema,
-    context: ({ req }) => ({ req }),
+    typeDefs,
+    resolvers,
+    context: ({ req }) => {
+      // Add authentication logic here if needed
+      return { req };
+    },
     plugins: [
-      ApolloServerPluginDrainHttpServer({ httpServer }),
       {
-        async serverWillStart() {
+        requestDidStart() {
           return {
-            async drainServer() {
-              await serverCleanup.dispose();
+            willSendResponse(requestContext) {
+              console.log(`GraphQL ${requestContext.request.operationName || 'Anonymous'} operation completed`);
             },
           };
         },
@@ -214,12 +230,17 @@ async function startServer() {
 
   const PORT = process.env.PORT || 4000;
   
-  httpServer.listen(PORT, () => {
+  const httpServer = app.listen(PORT, () => {
     console.log(`🚀 GraphQL API Server running on port ${PORT}`);
     console.log(`🔗 GraphQL endpoint: http://localhost:${PORT}${server.graphqlPath}`);
-    console.log(`📡 Subscriptions ready at ws://localhost:${PORT}/graphql`);
+    console.log(`📊 GraphQL Playground: http://localhost:${PORT}${server.graphqlPath}`);
+    console.log(`📡 Subscriptions ready`);
   });
 
+  // Setup subscriptions
+  server.installSubscriptionHandlers(httpServer);
+
+  // Graceful shutdown
   process.on('SIGTERM', () => {
     console.log('SIGTERM received, shutting down gracefully');
     httpServer.close(() => {
@@ -228,7 +249,7 @@ async function startServer() {
   });
 }
 
-// Health check (biarkan saja, ini bawaan file aslinya)
+// Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy',
@@ -241,7 +262,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Error handling (biarkan saja, ini bawaan file aslinya)
+// Error handling
 app.use((err, req, res, next) => {
   console.error('GraphQL API Error:', err);
   res.status(500).json({ 
@@ -250,7 +271,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Mulai server
 startServer().catch(error => {
   console.error('Failed to start GraphQL server:', error);
   process.exit(1);
