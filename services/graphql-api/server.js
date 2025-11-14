@@ -1,5 +1,10 @@
 const express = require('express');
 const { ApolloServer } = require('apollo-server-express');
+const { createServer } = require('http');
+const { ApolloServerPluginDrainHttpServer } = require('apollo-server-core');
+const { makeExecutableSchema } = require('@graphql-tools/schema');
+const { WebSocketServer } = require('ws');
+const { useServer } = require('graphql-ws/lib/use/ws');
 const { PubSub } = require('graphql-subscriptions');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
@@ -18,206 +23,221 @@ app.use(cors({
   credentials: true
 }));
 
-// In-memory data store (replace with real database in production)
-let posts = [
+// In-memory data store (ganti dengan database)
+let tasks = [
   {
     id: '1',
-    title: 'Welcome to GraphQL',
-    content: 'This is our first GraphQL post with subscriptions!',
-    author: 'GraphQL Team',
-    createdAt: new Date().toISOString(),
+    title: 'Setup Project',
+    description: 'Initial setup for the microservices project.',
+    status: 'COMPLETED',
+    assignedTo: '1', // User ID
+    createdBy: '1',
+    createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
   },
   {
     id: '2',
-    title: 'Real-time Updates',
-    content: 'Watch this space for real-time updates using GraphQL subscriptions.',
-    author: 'Development Team',
+    title: 'Implement Auth',
+    description: 'Implement JWT authentication in User Service and Gateway.',
+    status: 'IN_PROGRESS',
+    assignedTo: '1',
+    createdBy: '1',
     createdAt: new Date().toISOString(),
-  }
-];
-
-let comments = [
+  },
   {
-    id: '1',
-    postId: '1',
-    content: 'Great introduction to GraphQL!',
-    author: 'John Doe',
+    id: '3',
+    title: 'Build Frontend',
+    description: 'Create the Next.js frontend application.',
+    status: 'TODO',
+    assignedTo: '2',
+    createdBy: '1',
     createdAt: new Date().toISOString(),
   }
 ];
 
 // GraphQL type definitions
 const typeDefs = `
-  type Post {
-    id: ID!
-    title: String!
-    content: String!
-    author: String!
-    createdAt: String!
-    comments: [Comment!]!
+  enum TaskStatus {
+    TODO
+    IN_PROGRESS
+    COMPLETED
   }
 
-  type Comment {
+  type Task {
     id: ID!
-    postId: ID!
-    content: String!
-    author: String!
+    title: String!
+    description: String
+    status: TaskStatus!
+    assignedTo: ID
+    createdBy: ID!
     createdAt: String!
   }
 
   type Query {
-    posts: [Post!]!
-    post(id: ID!): Post
-    comments(postId: ID!): [Comment!]!
+    tasks(status: TaskStatus): [Task!]!
+    task(id: ID!): Task
   }
 
   type Mutation {
-    createPost(title: String!, content: String!, author: String!): Post!
-    updatePost(id: ID!, title: String, content: String): Post!
-    deletePost(id: ID!): Boolean!
-    createComment(postId: ID!, content: String!, author: String!): Comment!
-    deleteComment(id: ID!): Boolean!
+    createTask(title: String!, description: String): Task!
+    updateTask(id: ID!, title: String, description: String, status: TaskStatus, assignedTo: ID): Task!
+    deleteTask(id: ID!): Boolean!
   }
 
   type Subscription {
-    postAdded: Post!
-    commentAdded: Comment!
-    postUpdated: Post!
-    postDeleted: ID!
+    taskAdded: Task!
+    taskUpdated: Task!
+    taskDeleted: ID!
   }
 `;
+
+// Publikasi event
+const TASK_ADDED = 'TASK_ADDED';
+const TASK_UPDATED = 'TASK_UPDATED';
+const TASK_DELETED = 'TASK_DELETED';
 
 // GraphQL resolvers
 const resolvers = {
   Query: {
-    posts: () => posts,
-    post: (_, { id }) => posts.find(post => post.id === id),
-    comments: (_, { postId }) => comments.filter(comment => comment.postId === postId),
-  },
-
-  Post: {
-    comments: (parent) => comments.filter(comment => comment.postId === parent.id),
+    // Dapatkan semua task, bisa difilter by status
+    tasks: (_, { status }, context) => {
+      // context.user didapat dari header X-User-Payload
+      if (!context.user) throw new Error('Not authenticated');
+      
+      if (status) {
+        return tasks.filter(task => task.status === status);
+      }
+      return tasks;
+    },
+    // Dapatkan satu task
+    task: (_, { id }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
+      return tasks.find(task => task.id === id);
+    },
   },
 
   Mutation: {
-    createPost: (_, { title, content, author }) => {
-      const newPost = {
+    createTask: (_, { title, description }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
+      
+      const newTask = {
         id: uuidv4(),
         title,
-        content,
-        author,
+        description: description || '',
+        status: 'TODO',
+        assignedTo: null,
+        createdBy: context.user.id, // Set creator dari token
         createdAt: new Date().toISOString(),
       };
-      posts.push(newPost);
       
-      // Publish to subscribers
-      pubsub.publish('POST_ADDED', { postAdded: newPost });
+      tasks.push(newTask);
+      pubsub.publish(TASK_ADDED, { taskAdded: newTask });
       
-      return newPost;
+      return newTask;
     },
 
-    updatePost: (_, { id, title, content }) => {
-      const postIndex = posts.findIndex(post => post.id === id);
-      if (postIndex === -1) {
-        throw new Error('Post not found');
+    updateTask: (_, { id, title, description, status, assignedTo }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
+
+      const taskIndex = tasks.findIndex(task => task.id === id);
+      if (taskIndex === -1) {
+        throw new Error('Task not found');
       }
 
-      const updatedPost = {
-        ...posts[postIndex],
+      const originalTask = tasks[taskIndex];
+      const updatedTask = {
+        ...originalTask,
         ...(title && { title }),
-        ...(content && { content }),
+        ...(description && { description }),
+        ...(status && { status }),
+        ...(assignedTo && { assignedTo }), // Bisa assign ke user lain
       };
 
-      posts[postIndex] = updatedPost;
+      tasks[taskIndex] = updatedTask;
+      pubsub.publish(TASK_UPDATED, { taskUpdated: updatedTask });
       
-      // Publish to subscribers
-      pubsub.publish('POST_UPDATED', { postUpdated: updatedPost });
-      
-      return updatedPost;
+      return updatedTask;
     },
 
-    deletePost: (_, { id }) => {
-      const postIndex = posts.findIndex(post => post.id === id);
-      if (postIndex === -1) {
+    deleteTask: (_, { id }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
+      
+      // REQUIREMENT: Hanya admin yang bisa delete
+      if (context.user.role !== 'admin') {
+        throw new Error('Not authorized. Only admins can delete tasks.');
+      }
+
+      const taskIndex = tasks.findIndex(task => task.id === id);
+      if (taskIndex === -1) {
         return false;
       }
 
-      // Remove associated comments
-      comments = comments.filter(comment => comment.postId !== id);
+      tasks.splice(taskIndex, 1);
+      pubsub.publish(TASK_DELETED, { taskDeleted: id });
       
-      // Remove post
-      posts.splice(postIndex, 1);
-      
-      // Publish to subscribers
-      pubsub.publish('POST_DELETED', { postDeleted: id });
-      
-      return true;
-    },
-
-    createComment: (_, { postId, content, author }) => {
-      const post = posts.find(p => p.id === postId);
-      if (!post) {
-        throw new Error('Post not found');
-      }
-
-      const newComment = {
-        id: uuidv4(),
-        postId,
-        content,
-        author,
-        createdAt: new Date().toISOString(),
-      };
-      
-      comments.push(newComment);
-      
-      // Publish to subscribers
-      pubsub.publish('COMMENT_ADDED', { commentAdded: newComment });
-      
-      return newComment;
-    },
-
-    deleteComment: (_, { id }) => {
-      const commentIndex = comments.findIndex(comment => comment.id === id);
-      if (commentIndex === -1) {
-        return false;
-      }
-
-      comments.splice(commentIndex, 1);
       return true;
     },
   },
 
   Subscription: {
-    postAdded: {
-      subscribe: () => pubsub.asyncIterator(['POST_ADDED']),
+    taskAdded: {
+      subscribe: () => pubsub.asyncIterator([TASK_ADDED]),
     },
-    commentAdded: {
-      subscribe: () => pubsub.asyncIterator(['COMMENT_ADDED']),
+    taskUpdated: {
+      subscribe: () => pubsub.asyncIterator([TASK_UPDATED]),
     },
-    postUpdated: {
-      subscribe: () => pubsub.asyncIterator(['POST_UPDATED']),
-    },
-    postDeleted: {
-      subscribe: () => pubsub.asyncIterator(['POST_DELETED']),
+    taskDeleted: {
+      subscribe: () => pubsub.asyncIterator([TASK_DELETED]),
     },
   },
 };
 
+// --- Server Setup ---
 async function startServer() {
-  // Create Apollo Server
+  const schema = makeExecutableSchema({ typeDefs, resolvers });
+
+  const httpServer = createServer(app);
+
+  const wsServer = new WebSocketServer({
+    server: httpServer,
+    path: '/graphql',
+  });
+
+  // `useServer` menggantikan `SubscriptionServer`
+  const serverCleanup = useServer({ 
+    schema,
+    context: (ctx) => {
+      // Di sini kita bisa handle auth untuk WebSocket
+      console.log('WebSocket connection established');
+      return {};
+    },
+  }, wsServer);
+
+  // Apollo Server
   const server = new ApolloServer({
-    typeDefs,
-    resolvers,
+    schema,
     context: ({ req }) => {
-      // Add authentication logic here if needed
-      return { req };
+      // --- Ini adalah bagian penting ---
+      // Kita baca header 'X-User-Payload' yang dikirim oleh API Gateway
+      const userPayload = req.headers['x-user-payload'];
+      if (userPayload) {
+        try {
+          const user = JSON.parse(userPayload);
+          // Tambahkan user ke context
+          return { user };
+        } catch (e) {
+          console.error('Error parsing user payload:', e);
+          return {};
+        }
+      }
+      return {};
     },
     plugins: [
+      ApolloServerPluginDrainHttpServer({ httpServer }),
       {
-        requestDidStart() {
+        async serverWillStart() {
           return {
-            willSendResponse(requestContext) {
-              console.log(`GraphQL ${requestContext.request.operationName || 'Anonymous'} operation completed`);
+            async drainServer() {
+              await serverCleanup.dispose();
             },
           };
         },
@@ -230,46 +250,24 @@ async function startServer() {
 
   const PORT = process.env.PORT || 4000;
   
-  const httpServer = app.listen(PORT, () => {
-    console.log(`🚀 GraphQL API Server running on port ${PORT}`);
-    console.log(`🔗 GraphQL endpoint: http://localhost:${PORT}${server.graphqlPath}`);
-    console.log(`📊 GraphQL Playground: http://localhost:${PORT}${server.graphqlPath}`);
-    console.log(`📡 Subscriptions ready`);
+  httpServer.listen(PORT, () => {
+    console.log(`🚀 Task Service (GraphQL) running on port ${PORT}`);
+    console.log(`🔌 GraphQL endpoint: http://localhost:${PORT}${server.graphqlPath}`);
+    console.log(`📡 Subscriptions ready at ws://localhost:${PORT}${server.graphqlPath}`);
   });
 
-  // Setup subscriptions
-  server.installSubscriptionHandlers(httpServer);
-
-  // Graceful shutdown
-  process.on('SIGTERM', () => {
-    console.log('SIGTERM received, shutting down gracefully');
-    httpServer.close(() => {
-      console.log('Process terminated');
+  // Health check
+  app.get('/health', (req, res) => {
+    res.json({ 
+      status: 'healthy',
+      service: 'task-service-graphql',
+      timestamp: new Date().toISOString(),
+      data: {
+        tasks: tasks.length
+      }
     });
   });
 }
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy',
-    service: 'graphql-api',
-    timestamp: new Date().toISOString(),
-    data: {
-      posts: posts.length,
-      comments: comments.length
-    }
-  });
-});
-
-// Error handling
-app.use((err, req, res, next) => {
-  console.error('GraphQL API Error:', err);
-  res.status(500).json({ 
-    error: 'Internal server error',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
-  });
-});
 
 startServer().catch(error => {
   console.error('Failed to start GraphQL server:', error);

@@ -1,8 +1,16 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const userRoutes = require('./routes/users');
+const fs = require('fs');
+const path = require('path');
+
+
+const authRoutes = require('./routes/auth'); // File baru untuk login/register
+const usersRoutes = require('./routes/users'); // File lama kamu (JANGAN DIHAPUS)
+
+
 const { errorHandler } = require('./middleware/errorHandler');
 
 const app = express();
@@ -27,13 +35,29 @@ app.use(express.urlencoded({ extended: true }));
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'OK',
-    service: 'REST API Service',
+    service: 'User Service (REST API)',
     timestamp: new Date().toISOString()
   });
 });
 
-// Routes
-app.use('/api/users', userRoutes);
+
+app.use('/api/auth', authRoutes); // Rute baru untuk login/register
+app.use('/api/users', usersRoutes); // Rute lama kamu untuk CRUD user
+
+
+// --- Public Key Endpoint ---
+// Endpoint ini akan dipanggil oleh API Gateway untuk verifikasi token
+app.get('/api/auth/public-key', (req, res) => {
+  try {
+    const publicKeyPath = path.join(__dirname, 'jwtRS256.key.pub');
+    const publicKey = fs.readFileSync(publicKeyPath, 'utf8');
+    res.setHeader('Content-Type', 'application/x-pem-file');
+    res.status(200).send(publicKey);
+  } catch (error) {
+    console.error("Error reading public key:", error);
+    res.status(500).json({ error: "Could not retrieve public key." });
+  }
+});
 
 // Error handling middleware
 app.use(errorHandler);
@@ -47,8 +71,9 @@ app.use('*', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 REST API Service running on port ${PORT}`);
+  console.log(`🚀 User Service (REST API) running on port ${PORT}`);
   console.log(`📋 Health check: http://localhost:${PORT}/health`);
+  console.log(`🔑 Public Key available at: http://localhost:${PORT}/api/auth/public-key`);
 });
 
 module.exports = app;

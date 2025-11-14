@@ -1,22 +1,20 @@
 const Joi = require('joi');
 
-// User validation schema
+// Skema validasi registrasi
 const userSchema = Joi.object({
   name: Joi.string().min(2).max(50).required(),
   email: Joi.string().email().required(),
-  age: Joi.number().integer().min(1).max(150).required(),
-  role: Joi.string().valid('admin', 'user', 'moderator').optional()
+  password: Joi.string().min(6).required(),
+  role: Joi.string().valid('admin', 'user').optional()
 });
 
-// User update validation schema (all fields optional)
-const userUpdateSchema = Joi.object({
-  name: Joi.string().min(2).max(50).optional(),
-  email: Joi.string().email().optional(),
-  age: Joi.number().integer().min(1).max(150).optional(),
-  role: Joi.string().valid('admin', 'user', 'moderator').optional()
-}).min(1); // At least one field must be provided
+// Skema validasi login
+const loginSchema = Joi.object({
+  email: Joi.string().email().required(),
+  password: Joi.string().required()
+});
 
-// Validation middleware for creating users
+// Middleware validasi untuk registrasi
 const validateUser = (req, res, next) => {
   const { error } = userSchema.validate(req.body);
   
@@ -31,9 +29,9 @@ const validateUser = (req, res, next) => {
   next();
 };
 
-// Validation middleware for updating users
-const validateUserUpdate = (req, res, next) => {
-  const { error } = userUpdateSchema.validate(req.body);
+// Middleware validasi untuk login
+const validateLogin = (req, res, next) => {
+  const { error } = loginSchema.validate(req.body);
   
   if (error) {
     return res.status(400).json({
@@ -46,7 +44,27 @@ const validateUserUpdate = (req, res, next) => {
   next();
 };
 
+// Kita biarkan validasi user lama, walau tidak terpakai
+const validateUserUpdate = (req, res, next) => {
+  const userUpdateSchema = Joi.object({
+    name: Joi.string().min(2).max(50).optional(),
+    email: Joi.string().email().optional(),
+    age: Joi.number().integer().min(0).optional()
+  });
+
+  const { error } = userUpdateSchema.validate(req.body);
+  if (error) {
+    return res.status(400).json({
+      error: 'Validation error',
+      message: error.details[0].message
+    });
+  }
+  next();
+};
+
+
 module.exports = {
   validateUser,
-  validateUserUpdate
+  validateLogin,
+  validateUserUpdate // Tetap ekspor ini agar users.js tidak error
 };
