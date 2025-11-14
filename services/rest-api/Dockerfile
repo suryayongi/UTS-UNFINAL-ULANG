@@ -8,6 +8,11 @@ RUN npm install
 
 COPY . .
 
+# Copy environment file and keys
+COPY .env .
+COPY jwtRS256.key .
+COPY jwtRS256.key.pub .
+
 EXPOSE 3001
 
 CMD ["npm", "start"]
