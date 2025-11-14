@@ -1,223 +1,350 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useQuery, useMutation, gql } from '@apollo/client';
-import { userApi } from '@/lib/api';
+import { useQuery, useMutation, gql, useSubscription } from '@apollo/client';
+import { authApi } from '@/lib/api';
+import { jwtDecode } from 'jwt-decode';
 
-// GraphQL queries and mutations
-const GET_POSTS = gql`
-  query GetPosts {
-    posts {
+// --- State Types ---
+interface Task {
+  id: string;
+  title: string;
+  description: string;
+  status: 'TODO' | 'IN_PROGRESS' | 'COMPLETED';
+  createdBy: string;
+  createdAt: string;
+}
+
+interface User {
+  id: string;
+  email: string;
+  role: 'admin' | 'user';
+}
+
+// --- GraphQL Operations ---
+const GET_TASKS = gql`
+  query GetTasks {
+    tasks {
       id
       title
-      content
-      author
+      description
+      status
+      createdBy
       createdAt
     }
   }
 `;
 
-const CREATE_POST = gql`
-  mutation CreatePost($title: String!, $content: String!, $author: String!) {
-    createPost(title: $title, content: $content, author: $author) {
+const CREATE_TASK = gql`
+  mutation CreateTask($title: String!, $description: String) {
+    createTask(title: $title, description: $description) {
       id
       title
-      content
-      author
+      description
+      status
+      createdBy
       createdAt
     }
   }
 `;
+
+const DELETE_TASK = gql`
+  mutation DeleteTask($id: ID!) {
+    deleteTask(id: $id)
+  }
+`;
+
+const TASK_ADDED_SUBSCRIPTION = gql`
+  subscription OnTaskAdded {
+    taskAdded {
+      id
+      title
+      description
+      status
+      createdBy
+      createdAt
+    }
+  }
+`;
+
+// --- Helper: Cek jika token valid ---
+const isTokenExpired = (token: string): boolean => {
+  try {
+    const { exp } = jwtDecode(token);
+    if (!exp) return true;
+    return Date.now() >= exp * 1000;
+  } catch (error) {
+    return true;
+  }
+};
 
 export default function Home() {
-  const [users, setUsers] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [newUser, setNewUser] = useState({ name: '', email: '', age: '' });
-  const [newPost, setNewPost] = useState({ title: '', content: '', author: '' });
+  const [token, setToken] = useState<string | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [isLoginView, setIsLoginView] = useState(true);
+  
+  // State untuk Form
+  const [authForm, setAuthForm] = useState({ name: '', email: '', password: '', role: 'user' });
+  const [taskForm, setTaskForm] = useState({ title: '', description: '' });
+  
+  // State untuk Data
+  const [error, setError] = useState<string | null>(null);
+  const [allTasks, setAllTasks] = useState<Task[]>([]);
 
-  // GraphQL queries
-  const { data: postsData, loading: postsLoading, refetch: refetchPosts } = useQuery(GET_POSTS);
-  const [createPost] = useMutation(CREATE_POST);
+  // GraphQL Hooks
+  const { data: tasksData, loading: tasksLoading, refetch: refetchTasks } = useQuery(GET_TASKS, {
+    skip: !token, // Hanya fetch jika sudah login
+    onCompleted: (data) => setAllTasks(data.tasks || []),
+    onError: (err) => {
+      setError(err.message);
+      // Jika token error (misal expired), auto logout
+      if (err.message.includes('Unauthorized') || err.message.includes('Not authenticated')) {
+        handleLogout();
+      }
+    },
+  });
+  
+  const [createTask] = useMutation(CREATE_TASK, {
+    onError: (err) => setError(err.message),
+  });
+  
+  const [deleteTask] = useMutation(DELETE_TASK, {
+    onError: (err) => setError(err.message),
+  });
 
-  // Fetch users from REST API
+  // GraphQL Subscription
+  useSubscription(TASK_ADDED_SUBSCRIPTION, {
+    skip: !token,
+    onData: ({ data }) => {
+      const newTask = data.data.taskAdded;
+      setAllTasks((prevTasks) => [...prevTasks, newTask]);
+    }
+  });
+
+  // --- Auth Effect ---
+  // Cek token di localStorage saat komponen mount
   useEffect(() => {
-    fetchUsers();
+    const storedToken = localStorage.getItem('jwt-token');
+    if (storedToken && !isTokenExpired(storedToken)) {
+      try {
+        const decodedUser = jwtDecode<User>(storedToken);
+        setToken(storedToken);
+        setUser(decodedUser);
+      } catch (e) {
+        console.error("Token invalid:", e);
+        localStorage.removeItem('jwt-token');
+      }
+    } else {
+      localStorage.removeItem('jwt-token');
+    }
   }, []);
 
-  const fetchUsers = async () => {
-    try {
-      const response = await userApi.getUsers();
-      setUsers(response.data);
-    } catch (error) {
-      console.error('Error fetching users:', error);
-    } finally {
-      setLoading(false);
-    }
+  // --- Auth Handlers ---
+  const handleAuthInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    setAuthForm({ ...authForm, [e.target.name]: e.target.value });
   };
 
-  const handleCreateUser = async (e: React.FormEvent) => {
+  const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
     try {
-      await userApi.createUser({
-        name: newUser.name,
-        email: newUser.email,
-        age: parseInt(newUser.age)
-      });
-      setNewUser({ name: '', email: '', age: '' });
-      fetchUsers();
-    } catch (error) {
-      console.error('Error creating user:', error);
+      const response = isLoginView
+        ? await authApi.login({ email: authForm.email, password: authForm.password })
+        : await authApi.register({ name: authForm.name, email: authForm.email, password: authForm.password, role: authForm.role });
+
+      const { token: newToken } = response.data;
+      const decodedUser = jwtDecode<User>(newToken);
+      
+      localStorage.setItem('jwt-token', newToken);
+      setToken(newToken);
+      setUser(decodedUser);
+      refetchTasks(); // Ambil tasks setelah login
+    } catch (err: any) {
+      setError(err.response?.data?.message || err.message || 'An error occurred');
     }
   };
 
-  const handleCreatePost = async (e: React.FormEvent) => {
+  const handleLogout = () => {
+    setToken(null);
+    setUser(null);
+    setAllTasks([]);
+    localStorage.removeItem('jwt-token');
+  };
+
+  // --- Task Handlers ---
+  const handleTaskInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    setTaskForm({ ...taskForm, [e.target.name]: e.target.value });
+  };
+
+  const handleCreateTask = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
     try {
-      await createPost({
-        variables: newPost,
+      await createTask({
+        variables: {
+          title: taskForm.title,
+          description: taskForm.description,
+        },
       });
-      setNewPost({ title: '', content: '', author: '' });
-      refetchPosts();
-    } catch (error) {
-      console.error('Error creating post:', error);
+      setTaskForm({ title: '', description: '' });
+      // Tidak perlu refetch, subscription akan menangani update
+    } catch (err: any) {
+      setError(err.message);
     }
   };
 
-  const handleDeleteUser = async (id: string) => {
+  const handleDeleteTask = async (id: string) => {
+    setError(null);
     try {
-      await userApi.deleteUser(id);
-      fetchUsers();
-    } catch (error) {
-      console.error('Error deleting user:', error);
+      await deleteTask({ variables: { id } });
+      // Hapus dari state lokal
+      setAllTasks((prev) => prev.filter(task => task.id !== id));
+    } catch (err: any) {
+      setError(err.message);
     }
   };
 
-  return (
+  // --- Render Auth Form ---
+  const renderAuthForm = () => (
+    <div className="flex items-center justify-center min-h-screen bg-gray-100">
+      <div className="w-full max-w-md p-8 space-y-6 bg-white rounded-lg shadow-md">
+        <h2 className="text-2xl font-bold text-center text-gray-900">
+          {isLoginView ? 'Login' : 'Register'}
+        </h2>
+        {error && <p className="text-red-500 text-center">{error}</p>}
+        <form className="space-y-6" onSubmit={handleAuthSubmit}>
+          {!isLoginView && (
+            <>
+            <input
+              name="name"
+              type="text"
+              required
+              className="w-full px-3 py-2 border rounded-md text-gray-900"
+              placeholder="Name"
+              value={authForm.name}
+              onChange={handleAuthInputChange}
+            />
+            <select
+              name="role"
+              value={authForm.role}
+              onChange={handleAuthInputChange}
+              className="w-full px-3 py-2 border rounded-md text-gray-900"
+            >
+              <option value="user">User</option>
+              <option value="admin">Admin</option>
+            </select>
+            </>
+          )}
+          <input
+            name="email"
+            type="email"
+            required
+            className="w-full px-3 py-2 border rounded-md text-gray-900"
+            placeholder="Email address"
+            value={authForm.email}
+            onChange={handleAuthInputChange}
+          />
+          <input
+            name="password"
+            type="password"
+            required
+            className="w-full px-3 py-2 border rounded-md text-gray-900"
+            placeholder="Password"
+            value={authForm.password}
+            onChange={handleAuthInputChange}
+          />
+          <button
+            type="submit"
+            className="w-full px-4 py-2 text-white bg-blue-600 rounded-md hover:bg-blue-700"
+          >
+            {isLoginView ? 'Login' : 'Register'}
+          </button>
+        </form>
+        <p className="text-sm text-center text-gray-600">
+          {isLoginView ? "Don't have an account? " : "Already have an account? "}
+          <button
+            onClick={() => { setIsLoginView(!isLoginView); setError(null); }}
+            className="font-medium text-blue-600 hover:text-blue-500"
+          >
+            {isLoginView ? 'Register' : 'Login'}
+          </button>
+        </p>
+      </div>
+    </div>
+  );
+
+  // --- Render Dashboard ---
+  const renderDashboard = () => (
     <div className="min-h-screen bg-gray-100 py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-7xl mx-auto">
-        <h1 className="text-4xl font-bold text-center text-gray-900 mb-12">
-          Microservices Demo App
-        </h1>
+        <div className="flex justify-between items-center mb-8">
+          <h1 className="text-3xl font-bold text-gray-900">
+            Welcome, {user?.email} ({user?.role})
+          </h1>
+          <button
+            onClick={handleLogout}
+            className="px-4 py-2 text-white bg-red-600 rounded-md hover:bg-red-700"
+          >
+            Logout
+          </button>
+        </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* Users Section (REST API) */}
-          <div className="bg-white shadow rounded-lg p-6">
-            <h2 className="text-2xl font-bold text-gray-900 mb-6">Users (REST API)</h2>
-            
-            {/* Create User Form */}
-            <form onSubmit={handleCreateUser} className="mb-6">
-              <div className="grid grid-cols-1 gap-4">
-                <input
-                  type="text"
-                  placeholder="Name"
-                  value={newUser.name}
-                  onChange={(e) => setNewUser({ ...newUser, name: e.target.value })}
-                  className="border rounded-md px-3 py-2"
-                  required
-                />
-                <input
-                  type="email"
-                  placeholder="Email"
-                  value={newUser.email}
-                  onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
-                  className="border rounded-md px-3 py-2"
-                  required
-                />
-                <input
-                  type="number"
-                  placeholder="Age"
-                  value={newUser.age}
-                  onChange={(e) => setNewUser({ ...newUser, age: e.target.value })}
-                  className="border rounded-md px-3 py-2"
-                  min="1"
-                  max="150"
-                  required
-                />
-                <button
-                  type="submit"
-                  className="bg-blue-500 text-white px-4 py-2 rounded-md hover:bg-blue-600"
-                >
-                  Add User
-                </button>
-              </div>
+        {error && <p className="text-red-500 text-center mb-4">{error}</p>}
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          {/* Create Task Form */}
+          <div className="lg:col-span-1 bg-white shadow rounded-lg p-6">
+            <h2 className="text-2xl font-bold text-gray-900 mb-6">Create Task</h2>
+            <form onSubmit={handleCreateTask} className="space-y-4">
+              <input
+                name="title"
+                type="text"
+                placeholder="Task Title"
+                value={taskForm.title}
+                onChange={handleTaskInputChange}
+                className="w-full border rounded-md px-3 py-2 text-gray-900"
+                required
+              />
+              <textarea
+                name="description"
+                placeholder="Task Description"
+                value={taskForm.description}
+                onChange={handleTaskInputChange}
+                className="w-full border rounded-md px-3 py-2 h-24 text-gray-900"
+              />
+              <button
+                type="submit"
+                className="w-full bg-green-500 text-white px-4 py-2 rounded-md hover:bg-green-600"
+              >
+                Add Task
+              </button>
             </form>
-
-            {/* Users List */}
-            {loading ? (
-              <p>Loading users...</p>
-            ) : (
-              <div className="space-y-4">
-                {users.map((user: any) => (
-                  <div key={user.id} className="flex justify-between items-center p-3 border rounded">
-                    <div>
-                      <p className="font-semibold">{user.name}</p>
-                      <p className="text-gray-600 text-sm">{user.email}</p>
-                      <p className="text-gray-500 text-xs">Age: {user.age} • {user.role}</p>
-                    </div>
-                    <button
-                      onClick={() => handleDeleteUser(user.id)}
-                      className="bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600"
-                    >
-                      Delete
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
 
-          {/* Posts Section (GraphQL) */}
-          <div className="bg-white shadow rounded-lg p-6">
-            <h2 className="text-2xl font-bold text-gray-900 mb-6">Posts (GraphQL)</h2>
-            
-            {/* Create Post Form */}
-            <form onSubmit={handleCreatePost} className="mb-6">
-              <div className="grid grid-cols-1 gap-4">
-                <input
-                  type="text"
-                  placeholder="Title"
-                  value={newPost.title}
-                  onChange={(e) => setNewPost({ ...newPost, title: e.target.value })}
-                  className="border rounded-md px-3 py-2"
-                  required
-                />
-                <textarea
-                  placeholder="Content"
-                  value={newPost.content}
-                  onChange={(e) => setNewPost({ ...newPost, content: e.target.value })}
-                  className="border rounded-md px-3 py-2 h-24"
-                  required
-                />
-                <input
-                  type="text"
-                  placeholder="Author"
-                  value={newPost.author}
-                  onChange={(e) => setNewPost({ ...newPost, author: e.target.value })}
-                  className="border rounded-md px-3 py-2"
-                  required
-                />
-                <button
-                  type="submit"
-                  className="bg-green-500 text-white px-4 py-2 rounded-md hover:bg-green-600"
-                >
-                  Add Post
-                </button>
-              </div>
-            </form>
-
-            {/* Posts List */}
-            {postsLoading ? (
-              <p>Loading posts...</p>
+          {/* Tasks List */}
+          <div className="lg:col-span-2 bg-white shadow rounded-lg p-6">
+            <h2 className="text-2xl font-bold text-gray-900 mb-6">Task List (Real-time)</h2>
+            {tasksLoading ? (
+              <p className="text-gray-900">Loading tasks...</p>
             ) : (
               <div className="space-y-4">
-                {postsData?.posts.map((post: any) => (
-                  <div key={post.id} className="p-4 border rounded">
-                    <h3 className="font-semibold text-lg">{post.title}</h3>
-                    <p className="text-gray-600 mt-2">{post.content}</p>
-                    <div className="flex justify-between items-center mt-3 text-sm text-gray-500">
-                      <span>By: {post.author}</span>
-                      <span>{new Date(post.createdAt).toLocaleDateString()}</span>
+                {allTasks.map((task) => (
+                  <div key={task.id} className="flex justify-between items-center p-4 border rounded">
+                    <div className="text-gray-900">
+                      <h3 className="font-semibold text-lg">{task.title}</h3>
+                      <p className="text-gray-600 mt-1">{task.description}</p>
+                      <p className="text-gray-500 text-xs mt-2">
+                        Status: {task.status} | Created by user: {task.createdBy}
+                      </p>
                     </div>
+                    {user?.role === 'admin' && (
+                      <button
+                        onClick={() => handleDeleteTask(task.id)}
+                        className="bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600"
+                      >
+                        Delete
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -227,4 +354,6 @@ export default function Home() {
       </div>
     </div>
   );
+
+  return token ? renderDashboard() : renderAuthForm();
 }

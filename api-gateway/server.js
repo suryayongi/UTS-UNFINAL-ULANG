@@ -3,10 +3,14 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-require('dotenv').config();
+// HAPUS: require('express-jwt');
+// HAPUS: require('jwks-rsa');
+require('dotenv').config(); 
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const REST_API_URL = process.env.REST_API_URL || 'http://localhost:3001';
+const GRAPHQL_API_URL = process.env.GRAPHQL_API_URL || 'http://localhost:4000';
 
 // Security middleware
 app.use(helmet());
@@ -29,84 +33,76 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
+// --- HAPUS SEMUA LOGIC 'checkJwt' ---
+
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
+  res.json({
+    status: 'healthy',
     timestamp: new Date().toISOString(),
     services: {
-      'rest-api': process.env.REST_API_URL || 'http://localhost:3001',
-      'graphql-api': process.env.GRAPHQL_API_URL || 'http://localhost:4000'
+      'user-service': REST_API_URL,
+      'task-service': GRAPHQL_API_URL
     }
   });
 });
 
-// Proxy configuration for REST API
+// --- Proxy Definitions ---
+
+// HAPUS 'onProxyReq' (kita tidak butuh X-User-Payload lagi)
+
+// Proxy error handler
+const onError = (err, req, res, target) => {
+  console.error(`Proxy Error: ${err.message}`);
+  res.status(503).json({
+    error: 'Service unavailable',
+    message: `Could not connect to ${target.href}`
+  });
+};
+
+// Proxy configuration for REST API (User Service)
 const restApiProxy = createProxyMiddleware({
-  target: process.env.REST_API_URL || 'http://localhost:3001',
+  target: REST_API_URL,
   changeOrigin: true,
-  pathRewrite: {
-    '^/api': '/api', // Keep the /api prefix
-  },
-  onError: (err, req, res) => {
-    console.error('REST API Proxy Error:', err.message);
-    res.status(500).json({ 
-      error: 'REST API service unavailable',
-      message: err.message 
-    });
-  },
-  onProxyReq: (proxyReq, req, res) => {
-    console.log(`[REST API] ${req.method} ${req.url} -> ${proxyReq.path}`);
-  }
+  // HAPUS: onProxyReq,
+  onError: (err, req, res) => onError(err, req, res, { href: REST_API_URL }),
 });
 
-// Proxy configuration for GraphQL API
+// Proxy configuration for GraphQL API (Task Service)
 const graphqlApiProxy = createProxyMiddleware({
-  target: process.env.GRAPHQL_API_URL || 'http://localhost:4000',
+  target: GRAPHQL_API_URL,
   changeOrigin: true,
   ws: true, // Enable WebSocket proxying for subscriptions
-  onError: (err, req, res) => {
-    console.error('GraphQL API Proxy Error:', err.message);
-    res.status(500).json({ 
-      error: 'GraphQL API service unavailable',
-      message: err.message 
-    });
-  },
-  onProxyReq: (proxyReq, req, res) => {
-    console.log(`[GraphQL API] ${req.method} ${req.url} -> ${proxyReq.path}`);
-  }
+  // HAPUS: onProxyReq,
+  onError: (err, req, res) => onError(err, req, res, { href: GRAPHQL_API_URL }),
 });
 
-// Apply proxies
-app.use('/api', restApiProxy);
-app.use('/graphql', graphqlApiProxy);
+// Terapkan proxy (TANPA 'checkJwt')
+app.use('/api', restApiProxy); 
+app.use('/graphql', graphqlApiProxy); 
 
-// Catch-all route
-app.get('*', (req, res) => {
-  res.status(404).json({ 
+// --- HAPUS 'app.use((err, req, res, next) => { ... })' ---
+// (Error handling token sekarang ada di service)
+
+// Catch-all 404
+app.use('*', (req, res) => {
+  res.status(404).json({
     error: 'Route not found',
-    availableRoutes: [
-      '/health',
-      '/api/* (proxied to REST API)',
-      '/graphql (proxied to GraphQL API)'
-    ]
-  });
-});
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('Gateway Error:', err);
-  res.status(500).json({ 
-    error: 'Internal server error',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
+    message: `Cannot ${req.method} ${req.originalUrl}`
   });
 });
 
 const server = app.listen(PORT, () => {
   console.log(`🚀 API Gateway running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
-  console.log(`🔄 Proxying /api/* to: ${process.env.REST_API_URL || 'http://localhost:3001'}`);
-  console.log(`🔄 Proxying /graphql to: ${process.env.GRAPHQL_API_URL || 'http://localhost:4000'}`);
+  console.log(`🔄 Proxying /api/* to: ${REST_API_URL}`);
+  console.log(`🔄 Proxying /graphql to: ${GRAPHQL_API_URL}`);
+});
+
+// Handle upgrade (websockets) untuk subscriptions GraphQL
+server.on('upgrade', (req, socket, head) => {
+  console.log('[API Gateway] Upgrading WebSocket connection for GraphQL');
+  graphqlApiProxy.ws(req, socket, head);
 });
 
 // Graceful shutdown

@@ -6,10 +6,12 @@ const rateLimit = require('express-rate-limit');
 const fs = require('fs');
 const path = require('path');
 
-
-const authRoutes = require('./routes/auth'); // File baru untuk login/register
-const usersRoutes = require('./routes/users'); // File lama kamu (JANGAN DIHAPUS)
-
+// --- INI PERUBAHANNYA ---
+const authRoutes = require('./routes/auth'); // Rute publik
+const usersRoutes = require('./routes/users'); // Rute privat
+const teamsRoutes = require('./routes/teams'); // Rute privat
+const { authenticate } = require('./middleware/authMiddleware'); // Penjaga rute privat
+// --- SELESAI PERUBAHAN ---
 
 const { errorHandler } = require('./middleware/errorHandler');
 
@@ -40,13 +42,8 @@ app.get('/health', (req, res) => {
   });
 });
 
-
-app.use('/api/auth', authRoutes); // Rute baru untuk login/register
-app.use('/api/users', usersRoutes); // Rute lama kamu untuk CRUD user
-
-
 // --- Public Key Endpoint ---
-// Endpoint ini akan dipanggil oleh API Gateway untuk verifikasi token
+// Ini harus publik agar Gateway bisa ambil kuncinya
 app.get('/api/auth/public-key', (req, res) => {
   try {
     const publicKeyPath = path.join(__dirname, 'jwtRS256.key.pub');
@@ -58,6 +55,17 @@ app.get('/api/auth/public-key', (req, res) => {
     res.status(500).json({ error: "Could not retrieve public key." });
   }
 });
+
+
+// --- INI PERUBAHAN RUTE ---
+// Rute /api/auth (login, register) TIDAK pakai middleware
+app.use('/api/auth', authRoutes); 
+
+// Rute /api/users dan /api/teams WAJIB pakai middleware 'authenticate'
+app.use('/api/users', authenticate, usersRoutes); 
+app.use('/api/teams', authenticate, teamsRoutes);
+// --- SELESAI PERUBAHAN RUTE ---
+
 
 // Error handling middleware
 app.use(errorHandler);

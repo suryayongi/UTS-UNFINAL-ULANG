@@ -1,9 +1,6 @@
 node_modules
 npm-debug.log
-.git
-.gitignore
-README.md
-.env
-.env.local
-.DS_Store
-*.log
+
+# INI ADALAH PERBAIKANNYA:
+# Paksa Docker untuk TIDAK mengabaikan file .env
+!.env
